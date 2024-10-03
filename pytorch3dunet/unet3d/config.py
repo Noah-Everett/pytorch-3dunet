@@ -30,7 +30,7 @@ def _override_config(args, config):
                 c[k] = value
 
 
-def load_config():
+def load_config(textArgs=None):
     parser = argparse.ArgumentParser(description='UNet3D')
     parser.add_argument('--config', type=str, help='Path to the YAML config file', required=True)
     # add additional command line arguments for the prediction that override the ones in the config file
@@ -40,7 +40,7 @@ def load_config():
     parser.add_argument('--loaders.test.slice_builder.patch_shape', type=int, nargs="+", required=False)
     parser.add_argument('--loaders.test.slice_builder.stride_shape', type=int, nargs="+", required=False)
 
-    args = parser.parse_args()
+    args = parser.parse_args(args=textArgs)
     config_path = args.config
     config = yaml.safe_load(open(config_path, 'r'))
     _override_config(args, config)

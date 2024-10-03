@@ -9,9 +9,9 @@ from pytorch3dunet.unet3d.utils import get_logger
 logger = get_logger('TrainingSetup')
 
 
-def main():
+def main(textArgs=None):
     # Load and log experiment configuration
-    config, config_path = load_config()
+    config, config_path = load_config(textArgs)
     logger.info(config)
 
     manual_seed = config.get('manual_seed', None)
