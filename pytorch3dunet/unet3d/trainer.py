@@ -20,6 +20,7 @@ def create_trainer(config):
     # Create the model
     model = get_model(config['model'])
 
+    # check if mps is used
     if torch.cuda.device_count() > 1 and not config['device'] == 'cpu':
         model = nn.DataParallel(model)
         logger.info(f'Using {torch.cuda.device_count()} GPUs for prediction')
