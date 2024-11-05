@@ -46,6 +46,10 @@ def main():
         logger.info(f'Using {torch.cuda.device_count()} GPUs for prediction')
     if torch.cuda.is_available() and not config['device'] == 'cpu':
         model = model.cuda()
+    if torch.backends.mps.is_available():
+        logger.info('Using MPS')
+        mps_device = torch.device("mps")
+        model.to(mps_device)
 
     # create predictor instance
     predictor = get_predictor(model, config)

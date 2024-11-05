@@ -144,19 +144,33 @@ class FilterSliceBuilder(SliceBuilder):
         rand_state = np.random.RandomState(47)
 
         def ignore_predicate(raw_label_idx):
+            print('raw_label_idx:', raw_label_idx)
             label_idx = raw_label_idx[1]
+            print('label_idx:', label_idx)
             patch = label_dataset[label_idx]
             if ignore_index is not None:
                 patch = np.copy(patch)
                 patch[patch == ignore_index] = 0
             non_ignore_counts = np.count_nonzero(patch != 0)
             non_ignore_counts = non_ignore_counts / patch.size
+            print('non_ignore_counts:', non_ignore_counts)
+            print('threshold:', threshold)
             return non_ignore_counts > threshold or rand_state.rand() < slack_acceptance
 
+        # print('self.raw_slices:', self.raw_slices)
+        # print('self.label_slices:', self.label_slices)
+        # print('len(self.raw_slices):', len(self.raw_slices))
+        # print('len(self.label_slices):', len(self.label_slices))
         zipped_slices = zip(self.raw_slices, self.label_slices)
+        # print('*zipped_slices:', *zipped_slices)
+        # print('len([z for z in zipped_slices]):', len([z for z in zipped_slices]))
         # ignore slices containing too much ignore_index
         logger.info(f'Filtering slices...')
+        # print('ignore_predicate:', ignore_predicate)
+        # print('[ignore_predicate(slice) for slice in zipped_slices]:', [ignore_predicate(slice) for slice in zipped_slices])
         filtered_slices = list(filter(ignore_predicate, zipped_slices))
+        print('len(filtered_slices):', len(filtered_slices))
+        # print('*filtered_slices:', *filtered_slices)
         # unzip and save slices
         raw_slices, label_slices = zip(*filtered_slices)
         self._raw_slices = list(raw_slices)
