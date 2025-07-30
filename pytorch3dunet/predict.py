@@ -28,9 +28,9 @@ def get_predictor(model, config):
     return predictor_class(model, output_dir, out_channels, **predictor_config)
 
 
-def main():
+def main(textArgs=None):
     # Load configuration
-    config, _ = load_config()
+    config, _ = load_config(textArgs)
 
     # Create the model
     model = get_model(config['model'])
@@ -46,10 +46,6 @@ def main():
         logger.info(f'Using {torch.cuda.device_count()} GPUs for prediction')
     if torch.cuda.is_available() and not config['device'] == 'cpu':
         model = model.cuda()
-    if torch.backends.mps.is_available():
-        logger.info('Using MPS')
-        mps_device = torch.device("mps")
-        model.to(mps_device)
 
     # create predictor instance
     predictor = get_predictor(model, config)
