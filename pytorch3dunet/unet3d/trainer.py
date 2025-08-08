@@ -26,6 +26,8 @@ def create_trainer(config):
     if torch.cuda.is_available() and not config['device'] == 'cpu':
         model = model.cuda()
         logger.info(f'Using GPU {config["device"]} for training')
+    else:
+        logger.info(f'Using CPU for training. Found {torch.cuda.device_count()} GPUs and config["device"] is set to {config["device"]}')
 
     # Log the number of learnable parameters
     logger.info(f'Number of learnable params {get_number_of_learnable_parameters(model)}')
