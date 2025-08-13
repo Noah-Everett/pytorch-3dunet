@@ -220,7 +220,20 @@ class WeightedSmoothL1Loss(nn.SmoothL1Loss):
         l1[mask] = l1[mask] * self.weight
 
         return l1.mean()
+    
+############################################################################
+#############################   ADDED LOSSES   #############################
+############################################################################
+from segmentation_models_pytorch.losses import TverskyLoss as TverskyLoss_SMP
+class TverskyLoss(nn.Module):
+    def __init__(self, alpha=0.5, beta=0.5, smooth=0, gamma=1):
+        self.TL = TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
 
+    def forward(self, inputs, targets):
+        return self.TL(inputs, targets)
+############################################################################
+############################################################################
+############################################################################
 
 def flatten(tensor):
     """Flattens a given tensor such that the channel axis is first.
@@ -307,5 +320,11 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         return WeightedSmoothL1Loss(threshold=loss_config['threshold'],
                                     initial_weight=loss_config['initial_weight'],
                                     apply_below_threshold=loss_config.get('apply_below_threshold', True))
+    elif name == 'TverskyLoss':
+        alpha = loss_config.get('alpha', 0.5)
+        beta = loss_config.get('beta', 0.5)
+        smooth = loss_config.get('smooth', 0)
+        gamma = loss_config.get('gamma', 1.0)
+        return TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
     else:
         raise RuntimeError(f"Unsupported loss function: '{name}'")
