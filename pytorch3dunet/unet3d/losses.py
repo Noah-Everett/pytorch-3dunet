@@ -331,10 +331,6 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         beta = loss_config.get('beta', 0.5)
         smooth = loss_config.get('smooth', 0)
         gamma = loss_config.get('gamma', 1.0)
-        return TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
-    else:
-        raise RuntimeError(f"Unsupported loss function: '{name}'")
-s_config.get('gamma', 1.0)
-        return TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gammapply_below_threshold', True))
+        return TverskyLoss(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
     else:
         raise RuntimeError(f"Unsupported loss function: '{name}'")
