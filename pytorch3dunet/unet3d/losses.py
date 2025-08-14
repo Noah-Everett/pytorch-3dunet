@@ -36,6 +36,31 @@ def compute_per_channel_dice(input, target, epsilon=1e-6, weight=None):
     denominator = (input * input).sum(-1) + (target * target).sum(-1)
     return 2 * (intersect / denominator.clamp(min=epsilon))
 
+############################################################################
+#############################   ADDED LOSSES   #############################
+############################################################################
+def compute_per_channel_tversky(input, target, alpha=0.3, beta=0.7, epsilon=1e-6, weight=None):
+    assert input.size() == target.size(), "'input' and 'target' must have the same shape"
+    p = flatten(input)            # (C, N*...)
+    t = flatten(target).float()
+
+    tp = (p * t).sum(-1)
+    p_sum = p.sum(-1)
+    t_sum = t.sum(-1)
+    fp = p_sum - tp
+    fn = t_sum - tp
+
+    if weight is not None:
+        tp = weight * tp
+        fp = weight * fp
+        fn = weight * fn
+
+    denom = (tp + alpha * fp + beta * fn).clamp(min=epsilon)
+    return (tp + epsilon) / denom
+############################################################################
+############################################################################
+############################################################################
+
 
 class MaskingLossWrapper(nn.Module):
     """
@@ -271,17 +296,33 @@ class BCETversky(nn.Module):
     - pos_weight (tensor or float) can be provided to handle imbalance in BCE term.
     - normalization affects the Tversky term only (BCE expects logits).
     """
-
-    def __init__(self, alpha=0.3, beta=0.7, lam=1.0, pos_weight=None, normalization='sigmoid', epsilon=1e-6):
+    def __init__(self, alpha=0.3, beta=0.7, lam=1.0, pos_weight=None, ignore_index=None, epsilon=1e-6):
         super().__init__()
         if pos_weight is not None and not torch.is_tensor(pos_weight):
             pos_weight = torch.tensor(pos_weight)
-        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-        self.tversky = TverskyLoss(alpha=alpha, beta=beta, normalization=normalization, epsilon=epsilon)
-        self.lam = lam
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight, reduction='none')
+        self.alpha, self.beta, self.lam = alpha, beta, lam
+        self.ignore_index = ignore_index
+        self.eps = epsilon
 
-    def forward(self, input, target):
-        return self.bce(input, target) + self.lam * self.tversky(input, target)
+    def forward(self, logits, target):
+        tgt = target.float()
+        if self.ignore_index is None:
+            mask = torch.ones_like(tgt)
+        else:
+            mask = target.ne(self.ignore_index).to(dtype=tgt.dtype)
+
+        # BCE (masked)
+        bce_el = self.bce(logits, tgt)
+        valid = mask.sum().clamp(min=1)
+        bce = (bce_el * mask).sum() / valid
+
+        # Tversky (single sigmoid, masked)
+        probs = torch.sigmoid(logits)
+        t_idx = compute_per_channel_tversky(
+            probs * mask, tgt * mask, alpha=self.alpha, beta=self.beta, epsilon=self.eps
+        )
+        return bce + self.lam * (1.0 - t_idx.mean())
 ############################################################################
 ############################################################################
 ############################################################################
