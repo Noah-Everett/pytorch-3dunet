@@ -224,20 +224,64 @@ class WeightedSmoothL1Loss(nn.SmoothL1Loss):
 ############################################################################
 #############################   ADDED LOSSES   #############################
 ############################################################################
-from segmentation_models_pytorch.losses import TverskyLoss as TverskyLoss_SMP
-class TverskyLoss(nn.Module):
-    def __init__(self, alpha=0.5, beta=0.5, smooth=0, gamma=1):
-        super(TverskyLoss, self).__init__()
-        self.tl = TverskyLoss_SMP(
-            mode='binary',
-            alpha=alpha, 
-            beta=beta, 
-            smooth=smooth, 
-            gamma=gamma,
+class TverskyLoss(_AbstractDiceLoss):
+    """
+    Tversky loss (1 - T), where T = TP / (TP + alpha * FP + beta * FN).
+    Works with binary or multi-class (use normalization='sigmoid' or 'softmax').
+    """
+
+    def __init__(self, alpha=0.3, beta=0.7, weight=None, normalization='sigmoid', epsilon=1e-6):
+        super().__init__(weight=weight, normalization=normalization)
+        self.alpha = alpha
+        self.beta = beta
+        self.epsilon = epsilon
+
+    def dice(self, input, target, weight):
+        # reuse the 'dice' hook to return per-channel Tversky indices
+        return compute_per_channel_tversky(
+            input, target, alpha=self.alpha, beta=self.beta, epsilon=self.epsilon, weight=self.weight
         )
 
-    def forward(self, inputs, targets):
-        return self.tl(inputs, targets)
+class FocalTverskyLoss(_AbstractDiceLoss):
+    """
+    Focal Tversky loss: (1 - T) ** gamma, averaged across channels.
+    """
+
+    def __init__(self, alpha=0.3, beta=0.7, gamma=0.75, weight=None, normalization='sigmoid', epsilon=1e-6):
+        super().__init__(weight=weight, normalization=normalization)
+        self.alpha = alpha
+        self.beta = beta
+        self.gamma = gamma
+        self.epsilon = epsilon
+
+    def forward(self, input, target):
+        # probabilities
+        input = self.normalization(input)
+        # per-channel Tversky index
+        t = compute_per_channel_tversky(
+            input, target, alpha=self.alpha, beta=self.beta, epsilon=self.epsilon, weight=self.weight
+        )
+        # focal modulation
+        loss = (1.0 - t).clamp(min=0.0) ** self.gamma
+        return loss.mean()
+
+class BCETversky(nn.Module):
+    """
+    BCEWithLogits + lambda * Tversky loss.
+    - pos_weight (tensor or float) can be provided to handle imbalance in BCE term.
+    - normalization affects the Tversky term only (BCE expects logits).
+    """
+
+    def __init__(self, alpha=0.3, beta=0.7, lam=1.0, pos_weight=None, normalization='sigmoid', epsilon=1e-6):
+        super().__init__()
+        if pos_weight is not None and not torch.is_tensor(pos_weight):
+            pos_weight = torch.tensor(pos_weight)
+        self.bce = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+        self.tversky = TverskyLoss(alpha=alpha, beta=beta, normalization=normalization, epsilon=epsilon)
+        self.lam = lam
+
+    def forward(self, input, target):
+        return self.bce(input, target) + self.lam * self.tversky(input, target)
 ############################################################################
 ############################################################################
 ############################################################################
@@ -327,11 +371,28 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         return WeightedSmoothL1Loss(threshold=loss_config['threshold'],
                                     initial_weight=loss_config['initial_weight'],
                                     apply_below_threshold=loss_config.get('apply_below_threshold', True))
+############################################################################
+#############################   ADDED LOSSES   #############################
+############################################################################
     elif name == 'TverskyLoss':
-        alpha = loss_config.get('alpha', 0.5)
-        beta = loss_config.get('beta', 0.5)
-        smooth = loss_config.get('smooth', 0)
-        gamma = loss_config.get('gamma', 1.0)
-        return TverskyLoss(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
+        alpha = loss_config.get('alpha', 0.3)
+        beta = loss_config.get('beta', 0.7)
+        normalization = loss_config.get('normalization', 'sigmoid')
+        return TverskyLoss(alpha=alpha, beta=beta, weight=weight, normalization=normalization)
+    elif name == 'FocalTverskyLoss':
+        alpha = loss_config.get('alpha', 0.3)
+        beta = loss_config.get('beta', 0.7)
+        gamma = loss_config.get('gamma', 0.75)
+        normalization = loss_config.get('normalization', 'sigmoid')
+        return FocalTverskyLoss(alpha=alpha, beta=beta, gamma=gamma, weight=weight, normalization=normalization)
+    elif name == 'BCETversky':
+        alpha = loss_config.get('alpha', 0.3)
+        beta = loss_config.get('beta', 0.7)
+        lam = loss_config.get('lam', 1.0)
+        normalization = loss_config.get('normalization', 'sigmoid')
+        return BCETversky(alpha=alpha, beta=beta, lam=lam, pos_weight=pos_weight, normalization=normalization)
+############################################################################
+############################################################################
+############################################################################
     else:
         raise RuntimeError(f"Unsupported loss function: '{name}'")
