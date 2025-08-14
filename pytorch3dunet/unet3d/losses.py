@@ -227,13 +227,7 @@ class WeightedSmoothL1Loss(nn.SmoothL1Loss):
 from segmentation_models_pytorch.losses import TverskyLoss as TverskyLoss_SMP
 class TverskyLoss(nn.Module):
     def __init__(self, alpha=0.5, beta=0.5, smooth=0, gamma=1):
-        self.TL = TverskyLoss_SMP(
-            mode='binary', 
-            alpha=alpha, 
-            beta=beta, 
-            smooth=smooth, 
-            gamma=gamma,
-        )
+        self.TL = TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
 
     def forward(self, inputs, targets):
         return self.TL(inputs, targets)
@@ -332,5 +326,9 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         smooth = loss_config.get('smooth', 0)
         gamma = loss_config.get('gamma', 1.0)
         return TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gamma)
+    else:
+        raise RuntimeError(f"Unsupported loss function: '{name}'")
+s_config.get('gamma', 1.0)
+        return TverskyLoss_SMP(alpha=alpha, beta=beta, smooth=smooth, gamma=gammapply_below_threshold', True))
     else:
         raise RuntimeError(f"Unsupported loss function: '{name}'")
