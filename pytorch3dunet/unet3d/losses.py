@@ -516,7 +516,7 @@ class MeanDistanceFromTrueToReco(nn.Module):
         )
 
 
-class TotalLoss(nn.Module):
+class CompositeSparseDistanceLoss(nn.Module):
     """Sparse + α·mean(Reco→True) + β·mean(True→Reco) with chunked exact distances and fast epsilon selection.
        Uses voxel index coordinates; no external grid required.
     """
@@ -660,7 +660,7 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         chunk_size = loss_config.get('chunk_size', 65536)
         return MeanDistanceFromTrueToReco(epsilon=epsilon, optimize=optimize,
                                           minEntries=minEntries, chunk_size=chunk_size)
-    elif name == 'TotalLoss':
+    elif name == 'CompositeSparseDistanceLoss':
         epsilon = loss_config.get('epsilon', loss_config.get('eps', 15.0))
         optimize = loss_config.get('optimize', True)
         minEntries = loss_config.get('minEntries', 15)
@@ -668,9 +668,9 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         beta = loss_config.get('beta', 0.10)
         epsilon_sparse = loss_config.get('epsilon_sparse', 1.0)
         chunk_size = loss_config.get('chunk_size', 65536)
-        return TotalLoss(epsilon=epsilon, optimize=optimize, minEntries=minEntries,
-                         alpha=alpha, beta=beta, epsilon_sparse=epsilon_sparse,
-                         chunk_size=chunk_size)
+        return CompositeSparseDistanceLoss(epsilon=epsilon, optimize=optimize, minEntries=minEntries,
+                                           alpha=alpha, beta=beta, epsilon_sparse=epsilon_sparse,
+                                           chunk_size=chunk_size)
 ############################################################################
 ############################################################################
 ############################################################################
