@@ -4,7 +4,6 @@ from torch import nn as nn
 from torch.nn import MSELoss, SmoothL1Loss, L1Loss
 
 from pytorch3dunet.unet3d.utils import get_logger
-
 logger = get_logger('Loss')
 
 
@@ -41,7 +40,7 @@ def compute_per_channel_dice(input, target, epsilon=1e-6, weight=None):
 ############################################################################
 def compute_per_channel_tversky(input, target, alpha=0.3, beta=0.7, epsilon=1e-6, weight=None):
     assert input.size() == target.size(), "'input' and 'target' must have the same shape"
-    p = flatten(input)            # (C, N*...)
+    p = flatten(input)
     t = flatten(target).float()
 
     tp = (p * t).sum(-1)
@@ -245,6 +244,7 @@ class WeightedSmoothL1Loss(nn.SmoothL1Loss):
         l1[mask] = l1[mask] * self.weight
 
         return l1.mean()
+
     
 ############################################################################
 #############################   ADDED LOSSES   #############################
@@ -262,10 +262,9 @@ class TverskyLoss(_AbstractDiceLoss):
         self.epsilon = epsilon
 
     def dice(self, input, target, weight):
-        # reuse the 'dice' hook to return per-channel Tversky indices
-        return compute_per_channel_tversky(
-            input, target, alpha=self.alpha, beta=self.beta, epsilon=self.epsilon, weight=self.weight
-        )
+        return compute_per_channel_tversky(input, target, alpha=self.alpha, beta=self.beta,
+                                           epsilon=self.epsilon, weight=self.weight)
+
 
 class FocalTverskyLoss(_AbstractDiceLoss):
     """
@@ -280,15 +279,11 @@ class FocalTverskyLoss(_AbstractDiceLoss):
         self.epsilon = epsilon
 
     def forward(self, input, target):
-        # probabilities
-        input = self.normalization(input)
-        # per-channel Tversky index
-        t = compute_per_channel_tversky(
-            input, target, alpha=self.alpha, beta=self.beta, epsilon=self.epsilon, weight=self.weight
-        )
-        # focal modulation
-        loss = (1.0 - t).clamp(min=0.0) ** self.gamma
-        return loss.mean()
+        probs = self.normalization(input)
+        t = compute_per_channel_tversky(probs, target, alpha=self.alpha, beta=self.beta,
+                                        epsilon=self.epsilon, weight=self.weight)
+        return ((1.0 - t).clamp(min=0.0) ** self.gamma).mean()
+
 
 class BCETversky(nn.Module):
     """
@@ -319,10 +314,187 @@ class BCETversky(nn.Module):
 
         # Tversky (single sigmoid, masked)
         probs = torch.sigmoid(logits)
-        t_idx = compute_per_channel_tversky(
-            probs * mask, tgt * mask, alpha=self.alpha, beta=self.beta, epsilon=self.eps
-        )
+        t_idx = compute_per_channel_tversky(probs * mask, tgt * mask, alpha=self.alpha, beta=self.beta, epsilon=self.eps)
         return bce + self.lam * (1.0 - t_idx.mean())
+
+
+def sparse_loss(true: torch.Tensor, pred: torch.Tensor, epsilon: float = 1.0) -> torch.Tensor:
+    """Normalize MSE inside/outside mask separately and sum."""
+    true = true.float(); pred = pred.float()
+    mask = (true > epsilon).to(dtype=pred.dtype)
+    diff2 = (true - pred).pow(2)
+    denom_in = mask.sum().clamp(min=1.0)
+    denom_out = (mask.numel() - denom_in).clamp(min=1.0)
+    loss_in = (diff2 * mask).sum() / denom_in
+    loss_out = (diff2 * (1.0 - mask)).sum() / denom_out
+    return loss_in + loss_out
+
+
+def _min_pairwise_distances_chunked(A: torch.Tensor, B: torch.Tensor, chunk_size: int = 65536) -> torch.Tensor:
+    """Min distance from each row in A to any row in B, computed in chunks to reduce memory."""
+    device = A.device
+    Na = A.shape[0]
+    if Na == 0:
+        return torch.empty(0, device=device, dtype=A.dtype)
+    if B.shape[0] == 0:
+        return torch.zeros(Na, device=device, dtype=A.dtype)
+
+    mins = torch.empty(Na, device=device, dtype=A.dtype)
+    for i in range(0, Na, chunk_size):
+        a_chunk = A[i:i + chunk_size]
+        d = torch.cdist(a_chunk, B, p=2)
+        mins[i:i + a_chunk.size(0)] = d.min(dim=1).values
+        del d
+    return mins
+
+
+def _select_threshold_fast(pred: torch.Tensor, eps: float, min_entries: int) -> float:
+    """
+    Fast, loop-free epsilon optimization:
+    - If #(pred > eps) >= min_entries: keep eps.
+    - Else, consider only pred > 0 (since original loop never went below 0).
+      Pick the (min_entries)-th largest value among (pred > 0) as the new threshold (minus a tiny delta).
+      This guarantees at least min_entries items with '>' comparison, without iteration.
+    """
+    pred_flat = pred.reshape(-1)
+    count_now = (pred_flat > eps).sum().item()
+    if count_now >= min_entries:
+        return float(eps)
+
+    pos = pred_flat[pred_flat > 0]
+    if pos.numel() < min_entries:
+        # Cannot reach min_entries without going below 0; match original behavior by clamping to 0
+        return 0.0
+
+    # kth largest among positives → use kthvalue on ascending by selecting index (n-k)
+    n = pos.numel()
+    k_index = n - min_entries  # 0-based index for kth smallest that corresponds to kth largest overall
+    kth = pos.kthvalue(k_index + 1).values.item()
+    # Ensure strict '>' keeps at least min_entries (nudge just below kth)
+    return max(0.0, min(float(eps), float(kth)) - 1e-12)
+
+
+def distances_from_reco_to_true(
+    true: torch.Tensor,
+    pred: torch.Tensor,
+    grid_pos: torch.Tensor,
+    eps: float = 8.0,
+    optimize: bool = False,
+    min_entries: int = 20,
+    delta_eps: float = 0.1,      # kept for API compatibility (unused with fast optimize)
+    chunk_size: int = 65536
+) -> torch.Tensor:
+    """
+    Returns distances from each predicted location (above threshold) to its nearest non-zero true location.
+    If optimize=True, epsilon is chosen in one shot via selection (no loop), guaranteeing >= min_entries as in the TF intent.
+    """
+    true = true.float(); pred = pred.float()
+    device, dtype = pred.device, pred.dtype
+    grid_pos = grid_pos.to(device=device, dtype=dtype)
+
+    thresh = float(eps)
+    if optimize:
+        thresh = _select_threshold_fast(pred, eps=eps, min_entries=int(min_entries))
+
+    # Build indices
+    true_flat = true.reshape(-1)
+    pred_flat = pred.reshape(-1)
+    pred_idx = (pred_flat > thresh).nonzero(as_tuple=False).squeeze(1)
+    true_idx = (true_flat > 0).nonzero(as_tuple=False).squeeze(1)
+
+    if pred_idx.numel() == 0:
+        return torch.empty(0, device=device, dtype=dtype)
+    if true_idx.numel() == 0:
+        return torch.zeros(pred_idx.numel(), device=device, dtype=dtype)
+
+    pred_pos = grid_pos.index_select(0, pred_idx)  # [Np, 3]
+    true_pos = grid_pos.index_select(0, true_idx)  # [Nt, 3]
+
+    return _min_pairwise_distances_chunked(pred_pos, true_pos, chunk_size=chunk_size)
+
+
+def distances_from_true_to_reco(true, pred, grid_pos, **kw):
+    return distances_from_reco_to_true(pred, true, grid_pos, **kw)
+
+
+def mean_distance_from_reco_to_true(true, pred, grid_pos, **kw):
+    d = distances_from_reco_to_true(true, pred, grid_pos, **kw)
+    return d.mean() if d.numel() > 0 else d.new_tensor(0.0)
+
+
+def mean_distance_from_true_to_reco(true, pred, grid_pos, **kw):
+    d = distances_from_true_to_reco(true, pred, grid_pos, **kw)
+    return d.mean() if d.numel() > 0 else d.new_tensor(0.0)
+
+
+class SparseLoss(nn.Module):
+    def __init__(self, epsilon: float = 1.0):
+        super().__init__()
+        self.epsilon = epsilon
+
+    def forward(self, input, target):
+        return sparse_loss(target, input, epsilon=self.epsilon)
+
+
+class _GridPosMixin(nn.Module):
+    def __init__(self, grid_pos):
+        super().__init__()
+        grid_pos = torch.as_tensor(grid_pos, dtype=torch.float32)
+        if grid_pos.ndim != 2 or grid_pos.shape[1] != 3:
+            raise ValueError("grid_pos must be [N, 3]")
+        self.register_buffer('grid_pos', grid_pos, persistent=False)
+
+
+class MeanDistanceFromRecoToTrue(_GridPosMixin):
+    def __init__(self, grid_pos, epsilon: float = 8.0, optimize: bool = False, minEntries: int = 20,
+                 chunk_size: int = 65536):
+        super().__init__(grid_pos)
+        self.epsilon = epsilon
+        self.optimize = optimize
+        self.minEntries = minEntries
+        self.chunk_size = chunk_size
+
+    def forward(self, input, target):
+        return mean_distance_from_reco_to_true(
+            true=target, pred=input, grid_pos=self.grid_pos,
+            epsilon=self.epsilon, optimize=self.optimize, min_entries=self.minEntries,
+            chunk_size=self.chunk_size
+        )
+
+
+class MeanDistanceFromTrueToReco(_GridPosMixin):
+    def __init__(self, grid_pos, epsilon: float = 8.0, optimize: bool = False, minEntries: int = 20,
+                 chunk_size: int = 65536):
+        super().__init__(grid_pos)
+        self.epsilon = epsilon
+        self.optimize = optimize
+        self.minEntries = minEntries
+        self.chunk_size = chunk_size
+
+    def forward(self, input, target):
+        return mean_distance_from_true_to_reco(
+            true=target, pred=input, grid_pos=self.grid_pos,
+            eps=self.epsilon, optimize=self.optimize, min_entries=self.minEntries,
+            chunk_size=self.chunk_size
+        )
+
+
+class TotalLoss(_GridPosMixin):
+    """Sparse + α·mean(Reco→True) + β·mean(True→Reco) with chunked exact distances and fast epsilon selection."""
+    def __init__(self, grid_pos, epsilon: float = 15.0, optimize: bool = True, minEntries: int = 15,
+                 alpha: float = 0.10, beta: float = 0.10, epsilon_sparse: float = 1.0, 
+                 chunk_size: int = 65536):
+        super().__init__(grid_pos)
+        self.sparse = SparseLoss(epsilon=epsilon_sparse)
+        self.r2t = MeanDistanceFromRecoToTrue(self.grid_pos, epsilon=epsilon, optimize=optimize,
+                                              minEntries=minEntries, chunk_size=chunk_size)
+        self.t2r = MeanDistanceFromTrueToReco(self.grid_pos, epsilon=epsilon, optimize=optimize,
+                                              minEntries=minEntries, chunk_size=chunk_size)
+        self.alpha = alpha
+        self.beta = beta
+
+    def forward(self, input, target):
+        return self.sparse(input, target) + self.alpha * self.r2t(input, target) + self.beta * self.t2r(input, target)
 ############################################################################
 ############################################################################
 ############################################################################
@@ -432,6 +604,44 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         lam = loss_config.get('lam', 1.0)
         normalization = loss_config.get('normalization', 'sigmoid')
         return BCETversky(alpha=alpha, beta=beta, lam=lam, pos_weight=pos_weight, normalization=normalization)
+    elif name == 'SparseLoss':
+        epsilon = loss_config.get('epsilon', 1.0)
+        return SparseLoss(epsilon=epsilon)
+    elif name == 'MeanDistanceFromRecoToTrue':
+        epsilon = loss_config.get('epsilon', 8.0)
+        optimize = loss_config.get('optimize', False)
+        minEntries = loss_config.get('minEntries', 20)
+        chunk_size = loss_config.get('chunk_size', 65536)
+        return MeanDistanceFromRecoToTrue(grid_pos=loss_config['grid_pos'],
+                                          eps=epsilon,
+                                          optimize=optimize,
+                                          minEntries=minEntries,
+                                          chunk_size=chunk_size)
+    elif name == 'MeanDistanceFromTrueToReco':
+        epsilon = loss_config.get('epsilon', 8.0)
+        optimize = loss_config.get('optimize', False)
+        minEntries = loss_config.get('minEntries', 20)
+        chunk_size = loss_config.get('chunk_size', 65536)
+        return MeanDistanceFromTrueToReco(grid_pos=loss_config['grid_pos'],
+                                           eps=epsilon,
+                                           optimize=optimize,
+                                           minEntries=minEntries,
+                                           chunk_size=chunk_size)
+    elif name == 'TotalLoss':
+        epsilon = loss_config.get('epsilon', 15.0)
+        optimize = loss_config.get('optimize', True)
+        minEntries = loss_config.get('minEntries', 15)
+        alpha = loss_config.get('alpha', 0.10)
+        beta = loss_config.get('beta', 0.10)
+        epsilon_sparse = loss_config.get('epsilon_sparse', 1.0)
+        chunk_size = loss_config.get('chunk_size', 65536)
+        return TotalLoss(epsilon=epsilon,
+                         optimize=optimize,
+                         minEntries=minEntries,
+                         alpha=alpha,
+                         beta=beta,
+                         epsilon_sparse=epsilon_sparse,
+                         chunk_size=chunk_size)
 ############################################################################
 ############################################################################
 ############################################################################
