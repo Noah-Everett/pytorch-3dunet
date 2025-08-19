@@ -647,21 +647,21 @@ def _create_loss(name, loss_config, weight, ignore_index, pos_weight):
         epsilon = loss_config.get('epsilon', 1.0)
         return SparseLoss(epsilon=epsilon)
     elif name == 'MeanDistanceFromRecoToTrue':
-        epsilon = loss_config.get('epsilon', loss_config.get('epsilon', 8.0))
+        epsilon = loss_config.get('epsilon', loss_config.get('eps', 8.0))
         optimize = loss_config.get('optimize', False)
         minEntries = loss_config.get('minEntries', 20)
         chunk_size = loss_config.get('chunk_size', 65536)
         return MeanDistanceFromRecoToTrue(epsilon=epsilon, optimize=optimize,
                                           minEntries=minEntries, chunk_size=chunk_size)
     elif name == 'MeanDistanceFromTrueToReco':
-        epsilon = loss_config.get('epsilon', loss_config.get('epsilon', 8.0))
+        epsilon = loss_config.get('epsilon', loss_config.get('eps', 8.0))
         optimize = loss_config.get('optimize', False)
         minEntries = loss_config.get('minEntries', 20)
         chunk_size = loss_config.get('chunk_size', 65536)
         return MeanDistanceFromTrueToReco(epsilon=epsilon, optimize=optimize,
                                           minEntries=minEntries, chunk_size=chunk_size)
     elif name == 'TotalLoss':
-        epsilon = loss_config.get('epsilon', loss_config.get('epsilon', 15.0))
+        epsilon = loss_config.get('epsilon', loss_config.get('eps', 15.0))
         optimize = loss_config.get('optimize', True)
         minEntries = loss_config.get('minEntries', 15)
         alpha = loss_config.get('alpha', 0.10)
